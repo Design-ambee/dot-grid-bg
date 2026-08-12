@@ -1,8 +1,10 @@
 /*!
- * dot-grid.js — canvas dotted background with aurora / starry motion
+ * dot-grid.js — canvas dotted background with starry / aurora motion
  * Ambee — Design-ambee
  *
- * Usage: add data-dot-grid to any sized element.
+ * Usage: <div data-dot-grid></div> on a sized, positioned element.
+ * All defaults live in the D block below — override any of them per
+ * element with the matching attribute:
  *   data-dot-size, data-dot-gap, data-dot-gap-mobile, data-dot-opacity,
  *   data-dot-shape, data-dot-fade, data-dot-color,
  *   data-dot-aurora (comma-separated hex), data-dot-motion (shimmer|aurora),
@@ -22,6 +24,30 @@
 
   function dprNow() { return Math.min(window.devicePixelRatio || 1, MAXDPR); }
   function isMobile() { return window.matchMedia('(max-width: 767px)').matches; }
+
+  /* ---------------------------------------------------------------------
+     Ambee defaults. Every one of these can still be overridden per element
+     with the matching data- attribute, but a plain <div data-dot-grid>
+     already renders the tuned look with no further markup.
+     --------------------------------------------------------------------- */
+  var D = {
+    size:      2.1,
+    gap:       6,
+    gapMobile: 18,
+    opacity:   1,
+    shape:     'circle',
+    fade:      'center',
+    color:     '#ffffff',
+    aurora:    '#353535,#474747,#2d2d2d',
+    motion:    'shimmer',
+    speed:     3,
+    scale:     1,
+    vary:      0.6,
+    hover:     130,
+    grow:      0.85,
+    ease:      0.12,
+    mobile:    'static'
+  };
 
   var MASKS = {
     none:   '',
@@ -90,26 +116,29 @@
 
   DotGrid.prototype.read = function () {
     var d = this.host.dataset;
-    this.size    = parseFloat(d.dotSize) || 1.5;
-    this.gap     = Math.max(2, parseFloat(isMobile() && d.dotGapMobile ? d.dotGapMobile : d.dotGap) || 22);
+    var num = function (v, fb) { return (v != null && v !== '') ? parseFloat(v) : fb; };
 
-    /* data-dot-mobile: on (default) | static (draw once, no loop) | off */
-    var mob = d.dotMobile || 'on';
+    this.size = num(d.dotSize, D.size);
+    this.gap  = Math.max(2, isMobile() ? num(d.dotGapMobile, D.gapMobile) : num(d.dotGap, D.gap));
+
+    /* data-dot-mobile: on | static (draw once, no loop) | off */
+    var mob = d.dotMobile || D.mobile;
     this.off = isMobile() && mob === 'off';
     this.freeze = isMobile() && mob === 'static';
-    this.color   = d.dotColor || '#ffffff';
-    this.opacity = d.dotOpacity != null ? parseFloat(d.dotOpacity) : 0.35;
-    this.shape   = d.dotShape === 'square' ? 'square' : 'circle';
+    this.color   = d.dotColor || D.color;
+    this.opacity = num(d.dotOpacity, D.opacity);
+    this.shape   = (d.dotShape || D.shape) === 'square' ? 'square' : 'circle';
     this.rgb     = hexToRgb(this.color);
 
     /* aurora field — comma-separated hex list drives dot colour */
-    var list = (d.dotAurora || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var src = (d.dotAurora != null && d.dotAurora !== '') ? d.dotAurora : D.aurora;
+    var list = src.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
     this.aurora = list.length >= 2 ? list.map(hexToRgb) : null;
-    this.motion = d.dotMotion === 'shimmer' ? 'shimmer' : 'aurora';
+    this.motion = (d.dotMotion || D.motion) === 'aurora' ? 'aurora' : 'shimmer';
     this.ramp   = this.aurora ? buildRamp(this.aurora, this.opacity) : null;
-    this.speed  = (REDUCED || this.freeze) ? 0 : (d.dotSpeed != null ? parseFloat(d.dotSpeed) : 1);
-    this.scale  = d.dotScale != null ? parseFloat(d.dotScale) : 1;
-    this.vary   = d.dotVary != null ? parseFloat(d.dotVary) : 0;   // 0 = every dot identical
+    this.speed  = (REDUCED || this.freeze) ? 0 : num(d.dotSpeed, D.speed);
+    this.scale  = num(d.dotScale, D.scale);
+    this.vary   = num(d.dotVary, D.vary);
     if (this.time == null) this.time = Math.random() * 40;   // desync instances
     if (this.age == null) this.age = 0;
 
@@ -129,13 +158,13 @@
       });
     }
 
-    /* hover swell — same model as the aurora grid */
-    this.hover = parseFloat(d.dotHover) || 0;              // radius in px, 0 = off
-    this.grow  = d.dotGrow != null ? parseFloat(d.dotGrow) : 0.6;   // extra size at centre
-    this.ease  = d.dotEase != null ? parseFloat(d.dotEase) : 0.12;  // lerp factor
+    /* hover swell */
+    this.hover = num(d.dotHover, D.hover);   // radius in px, 0 = off
+    this.grow  = num(d.dotGrow, D.grow);     // extra size at centre
+    this.ease  = num(d.dotEase, D.ease);     // lerp factor
     if (REDUCED || !FINE) this.hover = 0;
 
-    var mask = MASKS[d.dotFade] || '';
+    var mask = MASKS[d.dotFade || D.fade] || '';
     this.canvas.style.maskImage = mask;
     this.canvas.style.webkitMaskImage = mask;
   };
