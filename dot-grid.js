@@ -3,14 +3,8 @@
  * Ambee — Design-ambee
  *
  * Usage: <div data-dot-grid></div> on a sized, positioned element.
- * All defaults live in the D block below — override any of them per
- * element with the matching attribute:
- *   data-dot-size, data-dot-gap, data-dot-gap-mobile, data-dot-opacity,
- *   data-dot-shape, data-dot-fade, data-dot-color,
- *   data-dot-aurora (comma-separated hex), data-dot-motion (shimmer|aurora),
- *   data-dot-speed, data-dot-scale, data-dot-vary,
- *   data-dot-hover, data-dot-grow, data-dot-ease,
- *   data-dot-mobile (on|static|off)
+ * Defaults live in the D block; override any per element with the
+ * matching data- attribute (see D for the full list).
  *
  * Re-init after a page transition: DotGrid.init(scope)
  */
@@ -213,23 +207,13 @@
     if (this.hover > 0) {
       /* listen on window, not the host — the canvas is pointer-events:none
          and content layered above the grid would otherwise swallow moves */
-      this.p = { x: -9999, y: -9999, tx: -9999, ty: -9999, s: 0, ts: 0 };
+      this.p = { x: -9999, y: -9999, tx: -9999, ty: -9999, s: 0, ts: 0, cx: 0, cy: 0, has: 0 };
 
       this._onMove = function (e) {
-        var r = self.host.getBoundingClientRect();
-        var x = e.clientX - r.left;
-        var y = e.clientY - r.top;
-        var inside = x >= 0 && y >= 0 && x <= r.width && y <= r.height;
+        /* store raw coords only — getBoundingClientRect() here would force a
+           layout flush on every pointermove, once per instance */
         var p = self.p;
-
-        /* with more than one grid on the page, every pointer move would
-           otherwise wake all of them for a frame. Skip instances that are
-           already settled and not being pointed at. */
-        if (!inside && p.s === 0 && p.ts === 0) return;
-
-        p.tx = x; p.ty = y;
-        if (p.s === 0 && inside) { p.x = x; p.y = y; }  // enter at the cursor, don't sweep in
-        p.ts = inside ? 1 : 0;
+        p.cx = e.clientX; p.cy = e.clientY; p.has = 1;
         self.loop();
       };
       this._onBlur = function () { self.p.ts = 0; self.loop(); };
@@ -289,9 +273,35 @@
     if (!this.seed || this.cols.length !== oldNx || this.rows.length !== oldNy) {
       this.seedShimmer();
     }
+    this.allocBuffers();
 
     this.draw();
     if (this.aurora && (this.speed || this.motion === 'shimmer')) this.loop();
+  };
+
+  /* Every frame-scoped array lives here and is reused. Allocating these
+     per frame at high dot counts is what crashes the renderer. */
+  DotGrid.prototype.allocBuffers = function () {
+    var n = this.cols.length * this.rows.length;
+    var nb = (this.palette ? this.palette.length : 1) * this.starBands;
+
+    if (n > 40000 && !this._dense) {
+      this._dense = true;
+      if (window.console && console.warn) {
+        console.warn('[dot-grid] ' + n.toLocaleString() + ' dots on this element (gap ' +
+          this.gap + 'px). Every frame redraws all of them — consider a larger ' +
+          'data-dot-gap if you see stutter.', this.host);
+      }
+    }
+    if (this._n === n && this._nb === nb && this._rad) return;
+
+    this._n = n; this._nb = nb;
+    this._rad    = new Float32Array(n);
+    this._band   = new Uint8Array(n);
+    this._order  = new Int32Array(n);
+    this._counts = new Int32Array(nb);
+    this._starts = new Int32Array(nb);
+    this._cursor = new Int32Array(nb);
   };
 
   /* Colour, size ceiling and twinkle rates are assigned per dot once, so
@@ -368,19 +378,25 @@
     var live = R && s > 0.002;
     var i, j, k;
 
-    /* ---- shimmer: random colour per dot, twinkling in place ---- */
+    /* ---- shimmer: random colour per dot, twinkling in place ----
+       Dots are counting-sorted into colour/brightness buckets using
+       preallocated typed arrays, then each bucket is stroked into the
+       context's own path buffer. Nothing is allocated per frame. */
     if (this.motion === 'shimmer' && this.seed) {
       var sd = this.seed, np = this.palette.length, AB = this.starBands;
-      var paths = new Array(np * AB);
-      for (i = 0; i < np * AB; i++) paths[i] = new Path2D();
       var tt = this.time, age = this.age, vary = this.vary;
+      var nb = np * AB, HID = 255;
+      var rad = this._rad, band = this._band, order = this._order;
+      var counts = this._counts, starts = this._starts, cursor = this._cursor;
 
+      for (i = 0; i < nb; i++) counts[i] = 0;
+
+      /* pass 1 — resolve each dot's radius and bucket */
       for (j = 0, k = 0; j < ny; j++) {
         var yy = rows[j];
         for (i = 0; i < nx; i++, k++) {
-          /* scattered fade-in — every colour lands together, no rings */
           var inn = age * 1.6 - sd.fade[k] * 0.8;
-          if (inn <= 0) continue;
+          if (inn <= 0) { band[k] = HID; continue; }
           if (inn > 1) inn = 1;
 
           /* two unrelated rates summed, then smoothstepped so dots
@@ -389,9 +405,6 @@
                   0.38 * (0.5 + 0.5 * fsin(tt * sd.s2[k] + sd.p2[k]));
           b = b * b * (3 - 2 * b);
 
-          /* radius is constant unless data-dot-vary is raised — the
-             twinkle lives in brightness, and the fade-in fades rather
-             than scales, so nothing changes size on load */
           var rad2 = vary
             ? r * (1 - vary + vary * sd.amp[k] * (0.5 + 0.5 * b))
             : r;
@@ -405,23 +418,39 @@
               rad2 *= 1 + grow * hf * s;
             }
           }
-          if (rad2 < 0.04) continue;
+          if (rad2 < 0.04) { band[k] = HID; continue; }
 
-          var bi = (b * (AB - 1) * inn + 0.5) | 0;
-          var pt = paths[sd.pal[k] * AB + bi];
-          if (square) {
-            pt.rect(cols[i] - rad2, yy - rad2, rad2 * 2, rad2 * 2);
-          } else {
-            pt.moveTo(cols[i] + rad2, yy);
-            pt.arc(cols[i], yy, rad2, 0, Math.PI * 2);
-          }
+          var bi = sd.pal[k] * AB + ((b * (AB - 1) * inn + 0.5) | 0);
+          band[k] = bi;
+          rad[k] = rad2;
+          counts[bi]++;
         }
       }
-      for (i = 0; i < np; i++) {
-        for (j = 0; j < AB; j++) {
-          ctx.fillStyle = this.palette[i][j];
-          ctx.fill(paths[i * AB + j]);
+
+      /* pass 2 — prefix sums, then place indices by bucket */
+      var acc = 0;
+      for (i = 0; i < nb; i++) { starts[i] = acc; cursor[i] = acc; acc += counts[i]; }
+      for (k = 0; k < ny * nx; k++) {
+        var bd = band[k];
+        if (bd !== HID) order[cursor[bd]++] = k;
+      }
+
+      /* pass 3 — one beginPath/fill per non-empty bucket */
+      for (i = 0; i < nb; i++) {
+        if (!counts[i]) continue;
+        ctx.fillStyle = this.palette[(i / AB) | 0][i % AB];
+        ctx.beginPath();
+        for (j = starts[i], k = starts[i] + counts[i]; j < k; j++) {
+          var idx = order[j];
+          var dx2 = cols[idx % nx], dy2 = rows[(idx / nx) | 0], rr = rad[idx];
+          if (square) {
+            ctx.rect(dx2 - rr, dy2 - rr, rr * 2, rr * 2);
+          } else {
+            ctx.moveTo(dx2 + rr, dy2);
+            ctx.arc(dx2, dy2, rr, 0, Math.PI * 2);
+          }
         }
+        ctx.fill();
       }
       return;
     }
@@ -517,6 +546,15 @@
     var moving = false;
     var p = this.p;
     if (p) {
+      /* one layout read per frame, not per pointermove */
+      if (p.has) {
+        var r = this.host.getBoundingClientRect();
+        var x = p.cx - r.left, y = p.cy - r.top;
+        var inside = x >= 0 && y >= 0 && x <= r.width && y <= r.height;
+        p.tx = x; p.ty = y;
+        if (p.s === 0 && inside) { p.x = x; p.y = y; }
+        p.ts = inside ? 1 : 0;
+      }
       var e = this.ease;
       p.x += (p.tx - p.x) * e;
       p.y += (p.ty - p.y) * e;
